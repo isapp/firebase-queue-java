@@ -8,7 +8,6 @@ import com.firebase.client.Query;
 import com.firebase.client.ValueEventListener;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -16,88 +15,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Queue {
-  static boolean slept;
-  static boolean aborted;
-  public static void main(final String[] args) {
-    final Firebase fb = new Firebase("https://fb-queue-test-2.firebaseio.com/");
+  /*package*/ static final long MAX_TRANSACTION_RETRIES = 10;
 
-    fb.removeValue(new Firebase.CompletionListener() {
-      @Override
-      public void onComplete(FirebaseError firebaseError, Firebase firebase) {
-        Map<String, Object> queueVals = new HashMap<String, Object>() {{
-          put("1", new HashMap<String, String>() {{
-            put("val", "some string");
-          }});
-          put("2", new HashMap<String, String>() {{
-            put("val", "some other string");
-          }});
-          put("3", new HashMap<String, String>() {{
-            put("val", "hello");
-          }});
-          put("4", new HashMap<String, String>() {{
-            put("val", "wassup");
-          }});
-          put("5", new HashMap<String, String>() {{
-            put("val", "last but not least");
-          }});
-          put("5", new ArrayList<String>() {{
-            add("malformed");
-          }});
-        }};
-        fb.child("queue/tasks/").setValue(queueVals, new Firebase.CompletionListener() {
-          @Override
-          public void onComplete(FirebaseError firebaseError, Firebase firebase) {
-            Queue q = new Builder(fb.child("queue"), new TaskProcessor() {
-              @Override
-              public void process(final Task task) throws InterruptedException {
-                String val = task.getData().get("val").toString();
-                Log.log(val, Log.Level.ERROR);
-
-                if("wassup".equals(val)) {
-                  task.reject("I don't like this word");
-                }
-                else if("hello".equals(val)) {
-                  if(!slept) {
-                    slept = true;
-                    try {
-                      Log.log("GOING TO SLEEP", Log.Level.ERROR);
-                      Thread.sleep(30000);
-                    } catch (InterruptedException e) {
-                      throw e;
-                    }
-                  }
-                  else if(!aborted) {
-                    aborted = true;
-                    task.abort();
-                  }
-                  else {
-                    task.resolve();
-                  }
-                }
-                else {
-                  task.resolve();
-                }
-              }
-            })
-                .numWorkers(4)
-                .build();
-          }
-        });
-      }
-    });
-
-    try {
-      Thread.sleep(Long.MAX_VALUE);
-    }
-    catch (InterruptedException e) {
-      e.printStackTrace();
-    }
-  }
-
-  public static final long MAX_TRANSACTION_RETRIES = 10;
-
-  private static final String TASK_CHILD = "tasks";
-  private static final String SPEC_CHILD = "specs";
+  /*package*/ static final String TASK_CHILD = "tasks";
+  /*package*/ static final String SPEC_CHILD = "specs";
 
   private static final TaskSpec DEFAULT_TASK_SPEC = new TaskSpec();
 
@@ -108,6 +29,7 @@ public class Queue {
 
   private final QueueExecutor.Factory executorFactory;
   private QueueExecutor executor;
+  private final TimeoutExecutorFactory timeoutExecutorFactory;
   private ScheduledThreadPoolExecutor timeoutExecutor;
 
   private Query newTaskQuery;
@@ -153,6 +75,10 @@ public class Queue {
 
     @Override
     public void onChildRemoved(DataSnapshot snapshot) {
+      if(shutdown.get()) {
+        return;
+      }
+
       Runnable timeout = timeoutsInFlight.remove(snapshot.getKey());
       if(timeout != null) {
         timeoutExecutor.remove(timeout);
@@ -170,7 +96,7 @@ public class Queue {
       Runnable timeout = new Runnable() {
         @Override
         public void run() {
-          if(timeoutsInFlight.remove(snapshot.getKey()) == null) {
+          if(shutdown.get() || timeoutsInFlight.remove(snapshot.getKey()) == null) {
             return;
           }
 
@@ -224,6 +150,7 @@ public class Queue {
   private final TaskReset taskReset;
 
   private TaskSpec taskSpec;
+  private final TaskSpecFactory taskSpecFactory;
   private final Firebase specRef;
   private final ValueEventListener specChangeListener = new ValueEventListener() {
     @Override
@@ -232,7 +159,7 @@ public class Queue {
         return;
       }
 
-      taskSpec = new TaskSpec(specSnapshot);
+      taskSpec = taskSpecFactory.get(specSnapshot);
       if(taskSpec.validate()) {
         Log.log("Got a new spec - " + taskSpec);
         onNewSpec();
@@ -250,14 +177,22 @@ public class Queue {
     }
   };
 
-  private final TaskStateListener taskStateListener = new TaskStateListener() {
+  private final QueueExecutor.TaskStateListener taskStateListener = new QueueExecutor.TaskStateListener() {
     @Override
     public void onTaskStart(Thread thread, QueueTask task) {
+      if(shutdown.get()) {
+        return;
+      }
+
       executingTasks.put(task.getTaskKey(), task);
     }
 
     @Override
     public void onTaskFinished(QueueTask task, Throwable error) {
+      if(shutdown.get()) {
+        return;
+      }
+
       executingTasks.remove(task.getTaskKey());
     }
   };
@@ -272,8 +207,11 @@ public class Queue {
     taskRef = queueRef.child(TASK_CHILD);
 
     executorFactory = builder.executorFactory;
+    timeoutExecutorFactory = builder.timeoutExecutorFactory;
 
-    taskReset = new TaskReset();
+    taskSpecFactory = builder.taskSpecFactory;
+
+    taskReset = builder.taskReset;
 
     if(options.specId == null) {
       specRef = null;
@@ -281,17 +219,24 @@ public class Queue {
       onNewSpec();
     }
     else {
-      specRef = queueRef.child(SPEC_CHILD);
-      specRef.child(options.specId).addValueEventListener(specChangeListener);
+      specRef = queueRef.child(SPEC_CHILD).child(options.specId);
+      specRef.addValueEventListener(specChangeListener);
     }
   }
 
   public void shutdown() {
     if(!shutdown.getAndSet(true)) {
-      specRef.removeEventListener(specChangeListener);
+      if(specRef != null && specChangeListener != null) {
+        specRef.removeEventListener(specChangeListener);
+      }
+
       stopListeningForNewTasks();
       shutdownExecutors();
     }
+  }
+
+  public int getExecutingTasksCount() {
+    return executingTasks.size();
   }
 
   private void onNewSpec() {
@@ -319,7 +264,7 @@ public class Queue {
 
     executor = executorFactory.get();
     executor.setTaskStateListener(taskStateListener);
-    timeoutExecutor = new ScheduledThreadPoolExecutor(1);
+    timeoutExecutor = timeoutExecutorFactory.get();
   }
 
   /**
@@ -367,7 +312,7 @@ public class Queue {
   public static class Builder {
     private static final String DEFAULT_SPEC_ID = null;
     private static final int DEFAULT_NUM_WORKERS = 1;
-    private static final int UNINITIALIZED_NUM_WORKERS = 1;
+    private static final int UNINITIALIZED_NUM_WORKERS = -1;
     private static final boolean DEFAULT_SANITIZE = true;
     private static final boolean DEFAULT_SUPPRESS_STACK = false;
 
@@ -381,9 +326,21 @@ public class Queue {
     private boolean sanitize = DEFAULT_SANITIZE;
     private boolean suppressStack = DEFAULT_SUPPRESS_STACK;
 
+    // used for quasi dependency injection
+    private final TaskReset taskReset = new TaskReset();
+    private final TimeoutExecutorFactory timeoutExecutorFactory = new DefaultTimeoutExecutorFactory();
+    private final TaskSpecFactory taskSpecFactory = new DefaultTaskSpecFactory();
+
     private QueueExecutor.Factory executorFactory;
 
     public Builder(@NotNull Firebase queueRef, @NotNull TaskProcessor taskProcessor) {
+      if(queueRef == null) {
+        throw new NullPointerException("A Queue.Builder cannot be passed a null Firebase ref");
+      }
+      else if(taskProcessor == null) {
+        throw new NullPointerException("A Queue.Builder cannot be passed a null TaskProcessor");
+      }
+
       this.queueRef = queueRef;
       this.taskProcessor = taskProcessor;
     }
@@ -441,17 +398,39 @@ public class Queue {
         numWorkers = DEFAULT_NUM_WORKERS;
       }
       if(executorFactory == null) {
-        executorFactory = new QueueExecutor.Factory() {
-          @Override
-          public QueueExecutor get() {
-            QueueExecutor executor = new QueueExecutor(numWorkers);
-            executor.prestartCoreThread();
-            return executor;
-          }
-        };
+        executorFactory = new DefaultQueueExecutorFactory(numWorkers);
       }
 
       return new Queue(this);
+    }
+
+    private static class DefaultQueueExecutorFactory implements QueueExecutor.Factory {
+      private final int numWorkers;
+
+      public DefaultQueueExecutorFactory(int numWorkers) {
+        this.numWorkers = numWorkers;
+      }
+
+      @Override
+      public QueueExecutor get() {
+        QueueExecutor executor = new QueueExecutor(numWorkers);
+        executor.prestartCoreThread();
+        return executor;
+      }
+    }
+
+    private static class DefaultTimeoutExecutorFactory implements TimeoutExecutorFactory {
+      @Override
+      public ScheduledThreadPoolExecutor get() {
+        return new ScheduledThreadPoolExecutor(1);
+      }
+    }
+
+    private static class DefaultTaskSpecFactory implements TaskSpecFactory {
+      @Override
+      public TaskSpec get(DataSnapshot specSnapshot) {
+        return new TaskSpec(specSnapshot);
+      }
     }
   }
 
@@ -471,8 +450,11 @@ public class Queue {
     }
   }
 
-  public interface TaskStateListener {
-    void onTaskStart(Thread thread, QueueTask task);
-    void onTaskFinished(QueueTask task, Throwable error);
+  /*package*/ interface TimeoutExecutorFactory {
+    ScheduledThreadPoolExecutor get();
+  }
+
+  /*package*/ interface TaskSpecFactory {
+    TaskSpec get(DataSnapshot specSnapshot);
   }
 }

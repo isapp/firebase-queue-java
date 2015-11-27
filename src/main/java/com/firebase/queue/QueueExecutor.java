@@ -2,14 +2,18 @@ package com.firebase.queue;
 
 import org.jetbrains.annotations.NotNull;
 
-import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 public class QueueExecutor extends ThreadPoolExecutor {
-  private Queue.TaskStateListener taskStateListener;
+  /*package*/ interface TaskStateListener {
+    void onTaskStart(Thread thread, QueueTask task);
+    void onTaskFinished(QueueTask task, Throwable error);
+  }
+
+  private TaskStateListener taskStateListener;
 
   public QueueExecutor(int numWorkers) {
     this(numWorkers, numWorkers, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>());
@@ -31,17 +35,17 @@ public class QueueExecutor extends ThreadPoolExecutor {
     super(corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue, new ThreadFactory(), new RejectedExecutionHandler());
   }
 
-  /*package*/ void setTaskStateListener(Queue.TaskStateListener taskStateListener) {
+  /*package*/ void setTaskStateListener(TaskStateListener taskStateListener) {
     this.taskStateListener = taskStateListener;
   }
 
   @Override
-  public void setThreadFactory(java.util.concurrent.ThreadFactory threadFactory) {
+  public void setThreadFactory(java.util.concurrent.ThreadFactory threadFactory) throws UnsupportedOperationException {
     throw new UnsupportedOperationException("The ThreadFactory of a QueueExecutor cannot be changed");
   }
 
   @Override
-  public void setRejectedExecutionHandler(java.util.concurrent.RejectedExecutionHandler handler) {
+  public void setRejectedExecutionHandler(java.util.concurrent.RejectedExecutionHandler handler) throws UnsupportedOperationException {
     throw new UnsupportedOperationException("The RejectedExecutionHandler of a QueueExecutor cannot be changed");
   }
 
@@ -59,16 +63,16 @@ public class QueueExecutor extends ThreadPoolExecutor {
     }
   }
 
-  private static final class ThreadFactory implements java.util.concurrent.ThreadFactory {
+  /*package*/ static final class ThreadFactory implements java.util.concurrent.ThreadFactory {
     @Override
     public Thread newThread(@NotNull Runnable r) {
       Thread t = new Thread(r);
-      t.setName(UUID.randomUUID().toString());
+      t.setName(UuidUtils.getUUID());
       return t;
     }
   }
 
-  private static final class RejectedExecutionHandler implements java.util.concurrent.RejectedExecutionHandler {
+  /*package*/ static final class RejectedExecutionHandler implements java.util.concurrent.RejectedExecutionHandler {
     @Override
     public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
       Log.debug("Task " + r.toString() + " rejected from " + executor.toString());

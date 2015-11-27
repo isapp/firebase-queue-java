@@ -1,16 +1,16 @@
 package com.firebase.queue;
 
 import com.firebase.client.Firebase;
-
-import java.util.UUID;
+import org.jetbrains.annotations.NotNull;
 
 /*package*/ class QueueTask implements Runnable {
+  /*package*/ static final String PRE_RUN_ID = "<id not set yet>";
   private String id;
 
-  private final Firebase taskRef;
-  private final TaskSpec taskSpec;
-  private final TaskReset taskReset;
-  private final Queue.Options options;
+  @NotNull private final Firebase taskRef;
+  @NotNull private final TaskSpec taskSpec;
+  @NotNull private final TaskReset taskReset;
+  @NotNull private final Queue.Options options;
 
   private Thread executingThread;
 
@@ -18,7 +18,7 @@ import java.util.UUID;
   private volatile boolean cancelled;
   private volatile boolean done;
 
-  public QueueTask(Firebase taskRef, TaskSpec taskSpec, TaskReset taskReset, Queue.Options options) {
+  public QueueTask(@NotNull Firebase taskRef, @NotNull TaskSpec taskSpec, @NotNull TaskReset taskReset, @NotNull Queue.Options options) {
     this.taskRef = taskRef;
     this.taskSpec = taskSpec;
     this.taskReset = taskReset;
@@ -46,10 +46,10 @@ import java.util.UUID;
   }
 
   public void cancel() {
-    String id = this.id == null ? "<id not set yet>" : this.id;
+    String id = this.id == null ? PRE_RUN_ID : this.id;
 
     if(cancelled || done) {
-      Log.log("Not cancelling task (" + taskRef.getKey() + ") on " + id + " because it " + (cancelled ? "was already cancelled" : " is already done"));
+      Log.log("Not cancelling task (" + taskRef.getKey() + ") on " + id + " because it " + (cancelled ? "was already cancelled" : "is already done"));
     }
     else {
       cancelled = true;
@@ -66,7 +66,7 @@ import java.util.UUID;
 
   @Override
   public void run() {
-    id = Thread.currentThread().getName() + ":" + UUID.randomUUID().toString();
+    id = Thread.currentThread().getName() + ":" + UuidUtils.getUUID();
 
     if(cancelled) {
       Log.log("Can't run task (" + taskRef.getKey() + ") on " + id +  " because it has previously been cancelled");
@@ -77,7 +77,7 @@ import java.util.UUID;
 
     Log.log("Started claiming task (" + taskRef.getKey() + ") on " + id);
 
-    TaskClaimer.TaskGenerator taskGenerator = new TaskClaimer(id, taskRef, taskSpec, taskReset, options.sanitize).claimTask();
+    TaskClaimer.TaskGenerator taskGenerator = getTaskClaimer(id, taskRef, taskSpec, taskReset, options).claimTask();
     if(taskGenerator == null) {
       Log.log("Couldn't claim task (" + taskRef.getKey() + ") on " + id);
       done = true;
@@ -97,7 +97,7 @@ import java.util.UUID;
 
     Log.log("Started processing task (" + taskRef.getKey() + ") on " + id);
 
-    ValidityChecker validityChecker = new ValidityChecker(Thread.currentThread(), id);
+    ValidityChecker validityChecker = getValidityChecker(id);
 
     Task task = taskGenerator.generateTask(id, taskSpec, taskReset, validityChecker, options);
     task.process(options.taskProcessor);
@@ -109,6 +109,14 @@ import java.util.UUID;
     Log.log("Finished processing task (" + taskRef.getKey() + ") on " + id);
   }
 
+  /*package*/ TaskClaimer getTaskClaimer(String id, Firebase taskRef, TaskSpec taskSpec, TaskReset taskReset, Queue.Options options) {
+    return new TaskClaimer(id, taskRef, taskSpec, taskReset, options.sanitize);
+  }
+
+  /*package*/ ValidityChecker getValidityChecker(String id) {
+    return new ValidityChecker(Thread.currentThread(), id);
+  }
+
   @Override
   public boolean equals(Object o) {
     if (this == o) return true;
@@ -116,13 +124,16 @@ import java.util.UUID;
 
     QueueTask queueTask = (QueueTask) o;
 
-    return id.equals(queueTask.id);
+    if (id != null ? !id.equals(queueTask.id) : queueTask.id != null) return false;
+    return taskRef.equals(queueTask.taskRef);
 
   }
 
   @Override
   public int hashCode() {
-    return id.hashCode();
+    int result = id != null ? id.hashCode() : 0;
+    result = 31 * result + taskRef.hashCode();
+    return result;
   }
 
   @Override

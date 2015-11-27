@@ -23,7 +23,7 @@ public class Task {
     /**
      * The task action failed
      * @param error a human readable description of what went wrong
-     * @param canRetry whether or not the action can be retried. If it is {@code false}, the {@link TaskProcessor#process(Task)} should be exited as soon as possible
+     * @param canRetry whether or not the action can be retried. If it is {@code false}, {@link TaskProcessor#process(Task)} should be exited as soon as possible
      */
     void onFailure(@NotNull String error, boolean canRetry);
   }

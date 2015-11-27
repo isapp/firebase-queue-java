@@ -29,6 +29,10 @@ import java.util.Map;
     reset(taskRef, null, inProgressState, null, 0);
   }
 
+  public void reset(@NotNull final Firebase taskRef, @NotNull final String inProgressState, @NotNull Listener listener) {
+    reset(taskRef, null, inProgressState, listener, 0);
+  }
+
   public void reset(@NotNull final Firebase taskRef, @NotNull String ownerId, @NotNull final String inProgressState) {
     reset(taskRef, ownerId, inProgressState, null, 0);
   }
@@ -83,7 +87,7 @@ import java.util.Map;
           }
           else {
             Log.log("Can't reset task " + taskKey + " - transaction errored too many times, no longer retrying", error);
-            if(listener != null) listener.onResetFailed("Can't reset task - transaction errored too many times, no longer retrying", true);
+            if(listener != null) listener.onResetFailed("Can't reset task - transaction errored too many times, no longer retrying - " + error, true);
           }
         }
         else {
